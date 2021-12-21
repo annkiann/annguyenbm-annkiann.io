@@ -1,0 +1,550 @@
+---
+title: "ITEC 620 - Group Project Proposal"
+author: "Binh Minh An Nguyen, Ahmed Malik"
+date: "11/27/2021"
+output:
+  word_document:
+    toc: yes
+    toc_depth: 2
+  html_document:
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+subtitle: Kogod School of Business
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(arules)
+library(tree)
+```
+
+# Executive Summary
+
+# Introduction
+
+# Data
+
+Before conducting data ingestion, we import the dataset to R using `read_csv()` function under the `tidyverse` package and assign into a variable named `accidents`. Since our dataset is large with multiple logical variables, `read_csv()` functions will be more efficient and productive.
+
+```{r original-data}
+accidents <- read_csv("~/Documents/Kogod - AU/Fall 2021/ITEC 620/Group Project/US_ Accident_calm_0.csv")
+```
+
+In this section, we will primarily cleanup our data, while moving on to the **Analysis** section, we will conduct secondary data wrangling for each analysis technique, if necessary. In the following code chunk, we are going to:
+
+1. Select only 26 relevant attributes
+
+2. Rename some of the columns/variables
+
+3. Re-format the date and time columns
+
+Since this dataset involve more than 1 million distinct obersations, duplicate removal is not required.
+
+In the following code chunk, we are going to conduct data ETL. And new dataset will be saved into a variable named `accident_c`.
+
+```{r data-wrangling}
+accident_c <- accidents %>% 
+  select(
+    Severity, Start_Time, End_Time, `Distance(mi)`, Description, Number, Street, City, State, Timezone, Weather_Timestamp, 
+    `Temperature(F)`, `Wind_Chill(F)`, `Humidity(%)`, `Visibility(mi)`, Wind_Direction, `Wind_Speed(mph)`, `Precipitation(in)`,
+    Weather_Condition, Amenity, Crossing, Give_Way, Junction, Railway, Station, Stop, Traffic_Signal, Nautical_Twilight
+  ) %>% 
+  rename(
+    distance = `Distance(mi)`, temperature = `Temperature(F)`, wind_chill = `Wind_Chill(F)`, humidity = `Humidity(%)`,
+    visibility = `Visibility(mi)`, wind_speed = `Wind_Speed(mph)`, precipitation = `Precipitation(in)`
+  ) %>% 
+  # Find out if the accidents happened on highway or on city road
+  mutate(is.highway = ifelse(is.na(Number), 1, 0)) %>% 
+  select(-c('Description', 'Number', 'Street')) %>% 
+  # Uniform column name to lower letter for better productivity
+  select_all(tolower) %>% 
+  mutate(
+    start_time_2 = parse_datetime(start_time, "%m/%d/%Y %H:%M")
+  ) %>% 
+  # Skip the missing values in start_time
+  filter(!is.na(start_time_2)) %>% 
+  # Extract year, quarter, month, hour from the start frame
+  mutate(
+    year = year(start_time_2),
+    quarter = quarter(start_time_2),
+    month = month(start_time_2),
+    hour = hour(start_time_2)
+  )
+```
+
+There were 34,680 rows dropped from the first wrangling process because of the improper date-time values in our original data. Nevertheles, we spot that there were cells contain multiple values under the column **weather_condition** in `accident_c` as well as in the original dataset. Such values observed are conflicting with the single-value concept in a data frame. Therefore, the following code chunk will pickup these strings and split them into different rows each for a single value. Since these are weather conditions that potentially affect the outcome of an accident, we are going to set them up as new dummy variables by using `pivot_wider()` function under the `tidyverse` package. The new dataset will then be assigned to a variable named `accident_pivot`.
+
+```{r accident-pivot}
+accident_pivot <- accident_c %>% 
+  mutate(id = seq(1:n())) %>% 
+  filter(!is.na(weather_condition)) %>% 
+  mutate(observations = 1) %>% 
+  separate_rows(weather_condition, sep = " / ", convert = TRUE) %>% 
+  pivot_wider(names_from = weather_condition, values_from = observations, values_fill = 0)
+```
+
+Now, we have a new dataset `accident_pivot` with 103 variables. Now, we will clean up the column names for our productivity.
+
+```{r} 
+names(accident_pivot) <- str_replace_all(names(accident_pivot), " ", "_") 
+
+accident_pivot <- accident_pivot %>% select_all(tolower)
+```
+
+
+
+
+# Analysis
+
+## Descriptive Data
+
+### Measurement of Frequency
+
+1. Count the number of each severity
+
+```{r severity-count}
+accident_pivot %>% 
+  group_by(severity) %>% 
+  summarize(count = n()) %>% 
+  ggplot(aes(x = severity, y = count/1000)) +
+  geom_col(fill = "steelblue") +
+  labs(x = "Severity", y = "Count '000") + 
+  theme_classic()
+```
+
+
+2. Histogram on the frequency of accident by states
+
+```{r accident-by-state, fig.width=8, fig.height=6}
+# Install `usmap` package to plot a map
+library(usmap)
+
+# Compute accident rates by state
+map_accident <- accident_pivot %>% 
+  group_by(state) %>% 
+  summarize(count = n()) %>% 
+  mutate(percent = round(count/sum(count), 2))
+
+# Visualize on US map
+plot_usmap(data = map_accident, values = "percent", color = "grey88", labels = TRUE) +
+  scale_fill_continuous(low = "white", high = "firebrick", label = scales::percent, name = NULL) + 
+  ggtitle("Accident Rates by State (2016 - 2020)") +
+  theme(legend.position = "bottom",
+        legend.key.width = unit(0.8, "in"),
+        text = element_text(size = 7),
+        plot.title = element_text(size = 16, hjust = 0.5)
+  )
+#ggsave("usmap_accidents.png")
+```
+
+
+3. Accident rates by timing
+
+```{r accident-heatmap}
+accident_hour <- accident_pivot %>% 
+  group_by(hour, severity) %>% 
+  summarize(total_accidents = n())
+
+accident_hour %>% 
+  ggplot(mapping = aes(x = factor(hour), y = factor(severity))) +
+  geom_tile(mapping = aes(fill = total_accidents)) +
+  scale_fill_continuous(low = "white", high = "firebrick", name = NULL) +
+  ggtitle("Accident Frequency by Hour") +
+  xlab("HOUR") +
+  ylab("SEVERITY") + theme(axis.ticks = element_line(linetype = "dashed"),
+    axis.text = element_text(family = "Times",
+        colour = "gray24"), axis.text.x = element_text(family = "Times"),
+    axis.text.y = element_text(family = "Times"),
+    panel.background = element_rect(fill = NA),
+    legend.position = "left") +labs(fill = "Frequency") + theme(legend.text = element_text(size = 6),
+    legend.title = element_text(size = 24),
+    legend.position = "bottom", legend.direction = "horizontal")  + theme(legend.position = "right", legend.direction = "vertical")
+```
+
+
+### Association Rules
+
+For association Rules, we will create new columns for each car accident severity. Similar process from the `weather_condition` will apply here as per following code chunk. The new dataset with **severity_1** to **severity_4** will be assign to a variable named `accident_binary`. As the result, we will have 107 columns for this new dataset.
+
+Besides,... (highway vs city road)
+
+```{r accident-binary}
+accident_binary <- accident_pivot %>% 
+  # Create dummy variables for each accident severity
+  mutate(
+    observations = 1,
+    is.day = ifelse(nautical_twilight == 'Day', TRUE, FALSE)) %>% 
+  pivot_wider(names_from = severity, values_from = observations, values_fill = 0) %>% 
+  rename(severity_1 = `1`, severity_2 = `2`, severity_3 = `3`, severity_4 = `4`) %>% 
+  select(-c('start_time', 'end_time', 'distance', 'city', 'state', 'timezone', 'weather_timestamp', 'temperature', 'wind_chill',
+            'wind_speed', 'id', 'humidity', 'visibility', 'wind_direction', 'precipitation', 'start_time_2', 'year', 'month', 
+            'quarter', 'hour', 'nautical_twilight')
+  ) %>% 
+  mutate_if(is.double, ~. > 0.5)
+```
+
+
+**1. Association Rules for Highway**
+
+[1] For highway, location conditions such as **amenity**, **crossing**, **stop**, and **railway** become irrelevant. Thus, we will remove these variables prior to running the association rules for the severity of highway accidents.
+
+```{r accident-hway}
+accident_hway <- accident_binary %>% 
+  filter(is.highway == TRUE) %>% 
+  select(-amenity, -crossing, -stop, -railway, -is.highway)
+
+hway_rules <- apriori(accident_hway, parameter = list(supp=0.0001, conf=0.0001))
+hway_sorted <- sort(hway_rules, by = "lift")
+```
+
+[2] Subset the association rules for each severity at the `rhs` and select those rules with the lift ratio of at least 2.
+
+ **a. Association Rules for Highway - Severity 1**
+
+```{r hway-sev-1}
+hway_rules_1 <- subset(hway_sorted, subset = rhs %in% c("severity_1") & lift >= 2)
+
+inspect(hway_rules_1)
+```
+
+The highest rules....
+
+
+  **b. Association Rules for Highway - Severity 2**
+
+As we filter the association rules with a lift ratio being equal or more than 2, seems like there was no rules returned. Thus, for this section only, we will decrease the criterion of lift ratio for the severity 2.
+
+```{r hway-sev-2}
+hway_rules_2 <- subset(hway_sorted, subset = rhs %in% c("severity_2") & lift > 1)
+
+inspect(hway_rules_2)
+```
+
+It seems like for Severity 2, there are more than 500 combinations of conditions that would cause the accident with severity 2 to happen more likely. However, none of them reach the likelihood or a lift ratio of 1.5.
+
+  **c. Association Rules for Highway - Severity 3**
+
+```{r hway-sev-3}
+hway_rules_3 <- subset(hway_sorted, subset = rhs %in% c("severity_3") & lift >= 2)
+
+inspect(hway_rules_3)
+```
+
+  **d. Association Rules for Highway - Severity 4**
+
+```{r hway-sev-4}
+hway_rules_4 <- subset(hway_sorted, subset = rhs %in% c("severity_4") & lift >= 1.5)
+
+inspect(hway_rules_4)
+```
+
+
+**2. Association Rules for Severities of Accidents on city roads**
+
+```{r accident-city-road}
+accident_city <- accident_binary %>% 
+  filter(is.highway == FALSE) %>% 
+  select(-is.highway)
+
+city_rules <- apriori(accident_city, parameter = list(supp=0.0001, conf=0.0001))
+city_sorted <- sort(city_rules, by = "lift")
+```
+
+Again, we only want to check the relationship between independent variables (LHS) and the severities (RHS). Therefore, in the following code chunk, we will subset the association rules with the lift ratio is at least 2 to support our analysis.
+
+  **a. Association Rules for City Road - Severity 1**
+
+```{r city-sev-1}
+city_rules_1 <- subset(city_sorted, subset = rhs %in% c("severity_1") & lift >= 4)
+
+inspect(city_rules_1)
+```
+
+  **b. Association Rules for City Road - Severity 2**
+
+Similar to the association rules for `Highway - Severity 2`, there are 153 rules that will cause the severity 2 more likely to happen on the city road. However, none of them are dominately significant (none of the lift ratio > 1.5).
+
+```{r city-sev-2}
+city_rules_2 <- subset(city_sorted, subset = rhs %in% c("severity_2") & lift >= 1.1)
+
+inspect(city_rules_2)
+```
+
+  
+  **c. Association Rules for City Road - Severity 3**
+
+```{r city-sev-3}
+city_rules_3 <- subset(city_sorted, subset = rhs %in% c("severity_3") & lift >= 2)
+
+inspect(city_rules_3)
+```
+
+  
+  **d. Association Rules for City Road - Severity 4**
+  
+```{r city-sev-4}
+city_rules_4 <- subset(city_sorted, subset = rhs %in% c("severity_4") & lift >= 2)
+
+inspect(city_rules_4)
+```
+
+    
+## Predictive Data
+
+### Logistic Regression
+
+**Preparation**
+
+Before performing the logistic regression, we will convert the logical variables in our dataset, which indicate weather and environmental factors related to the accidents, into binary values of `1/0`.
+
+```{r data-glm}
+accident_glm <- accident_pivot %>% 
+  mutate_if(is.logical, as.integer) %>% 
+  mutate(is.day = ifelse(nautical_twilight == 'Day', 1, 0)) %>% 
+  filter(!is.na(weather_timestamp), !is.na(humidity), !is.na(visibility), !is.na(wind_speed), !is.na(precipitation)) %>%
+  filter(!is.na(is.day)) %>% 
+  filter(!is.na(weather_timestamp)) %>% 
+  filter(wind_direction != "North", !is.na(wind_speed)) %>% 
+  select(-start_time, -end_time, -distance, -city, -state, -timezone, -weather_timestamp, -wind_chill, -wind_direction, -nautical_twilight, -start_time_2, -year, -quarter, -month, -hour, -id, -'n/a_precipitation') %>% 
+  rename(heavy_storm = 'heavy_t-storm', storm = 't-storm') %>% 
+  drop_na()
+```
+
+
+**Logistic Regression Model**
+
+[1] In the following code chunk, we will build a logistic regression model using 85 independent variables, indicating location, day/night, and weather conditions. After that, we will use the `summary()` function to check through the coefficients and associated p-values to decide whether any variables are insignificant.
+
+```{r glm-model}
+accident_glm <- as.data.frame(accident_glm)
+
+set.seed(12345)
+
+training <- sample(1:nrow(accident_glm), 0.6*nrow(accident_glm))
+
+nvars <- ncol(accident_glm)
+
+ycol <- match('severity',colnames(accident_glm))
+
+accidents.training <- accident_glm[training,-ycol]
+accidents.training.results <- accident_glm[training,ycol]
+
+accidents.test <- accident_glm[-training,-ycol]
+accidents.test.results <- accident_glm[-training,ycol]
+
+accident_glm$severity <- accident_glm$severity > 2
+accidents.training.results <- accidents.training.results > 2
+accidents.test.results <- accidents.test.results > 2
+
+
+accident_severity <- glm(severity ~., 
+                         family = binomial(link="logit"),  
+                         data=accident_glm[training,])
+
+summary(accident_severity)
+```
+
+[2] Based on p-values associated with all variables in our initial logistic regression model, there are 41 significant variables. Thus, we will use these 41 variables to create new logistic regression model.
+
+Nevertheless, we observe that there are 10 `NA` in our `summary()` output. These results are because the associated variables contain only `0` value.
+
+```{r glm-model-1}
+accident_severity_1 <- glm(severity ~ temperature+humidity+visibility+wind_speed+amenity+crossing+give_way+junction+
+                        railway+station+traffic_signal+is.highway+windy+is.day+drizzle_and_fog+light_sleet+light_rain_shower+widespread_dust+
+                          heavy_storm+storm+light_rain_with_thunder+thunder+thunderstorm+heavy_thunderstorms_and_rain+light_freezing_rain+smoke+
+                          light_rain_showers+light_thunderstorms_and_rain+thunderstorms_and_rain+drizzle+rain+haze+light_drizzle+
+                          light_freezing_drizzle+clear+scattered_clouds+light_snow+snow+overcast+light_rain+precipitation, 
+                        family = binomial(link="logit"),  
+                        data=accident_glm[training,])
+
+summary(accident_severity_1)
+```
+
+All of variables seem to be significant in our revised model. 
+
+[3] Thus, we can move on with the predictions by applying our logistic regression model on the validating set.
+
+```{r glm-predict}
+accident.test.probabilities <- predict(accident_severity_1, accidents.test, type = "response")
+accident.glm.classifications <- round(accident.test.probabilities, 0)
+```
+
+Now, let's calculate the Root Mean Square Error of the model on our test set:
+
+```{r glm-classification-RMSE}
+sum(accident.glm.classifications == accidents.test.results) / length(accidents.test.results)
+```
+
+[4] Given that the logistic regression model can predict up to 89.40% accurately on our test set, equivalent to an error rate of 10.6%, additionally, our dataset is skewed to Non-severity, it seems In addition, we are interested in know how in particular our model predicts the Non-Severity (0) and Severity (1) and how accuracy the model predicts severed accidents by generating the confusion matrix table given the built logistic regression model:
+
+```{r confusion-matrix}
+table(accident.glm.classifications, accidents.test.results)
+```
+
+**Precision Rate**: The percentage that our model predicts severed accidents correctly is: 
+
+```{r}
+14/69
+```
+
+
+
+### Classification trees
+
+We will use the second method - Classification tree - to predict the binary accident severity. In the following code chunk, we will:
+
+1. Generate a training set (60% data points) and a validating set (40% data points)
+
+2. Since our dataset is large, we will use the code given during class ITEC 620 - Week 11: Classification.R to find the most optimal value of `mindev` and the best `error rate` for our classification tree.
+
+```{r accident-tree}
+# To make sure there was no missing value in our dataset
+accident_tree <- accident_glm  %>% 
+  mutate(severity = ifelse(severity == TRUE, 1, 0)) %>% 
+  drop_na()
+
+accident_tree <- as.data.frame(accident_tree)
+
+# To reproduce the results
+set.seed(12345)
+
+# Randomly partitioning 60% of data points into a training set to build the tree model
+tree_training <- sample(1:nrow(accident_tree), 0.6*nrow(accident_tree))
+
+# To identify the dependent variable y-value
+ycol <- match('severity', colnames(accident_tree))
+
+# Generate variables that contain the training set
+accident_tree_training <- accident_tree[tree_training, -ycol]
+accident_tree_training_results <- accident_tree[tree_training, ycol] > 0.5
+
+# Generate the variables that contain the validating set
+accident_tree_test <- accident_tree[-tree_training, -ycol]
+accident_tree_test_results <- accident_tree[-tree_training, ycol] > 0.5
+
+# Find the most optimum mindev values and the most minimum error rate
+best.mindev <- -1
+error.rate <- -1
+best.error.rate <- 99999999
+for (i in seq(from=0.00004, to=0.05, by=0.0005)) {
+  accident.tree <- tree(severity ~ ., data=accident_tree[tree_training,], mindev=i)
+  accident.tree.proportions <- predict(accident.tree,accident_tree[-tree_training,])
+  accident.tree.classifications <- round(accident.tree.proportions,0)
+  error.rate <- 1- (sum(accident.tree.classifications == accident_tree_test_results) / nrow(accident_tree[-tree_training,]))
+  if (error.rate < best.error.rate) {
+    best.mindev <- i
+    best.error.rate <- error.rate
+  }
+}
+print(paste("The optimal value of mindev is",best.mindev,"with an overall error rate of",best.error.rate))
+```
+
+
+With such best mindev and an error rate of 0.104238511849146, we plot our best classification tree below:
+
+```{r classification-tree, fig.width=6, fig.height=5}
+accident.best.tree <- tree(severity ~ ., data=accident_tree[training,], mindev=best.mindev)
+plot(accident.best.tree)
+text(accident.best.tree, cex=0.6)
+```
+
+
+
+```{r tree-confusion}
+table(accident.tree.classifications, accident_tree_test_results)
+```
+
+
+**Classification tree analysis**
+
+Firstly, [interpret the tree results]
+
+Secondly, compare with the Logistic Regression model resulte, Classification tree return lower error rate. Thus....
+
+
+
+### Time-Series Analysis
+
+**Preparation**
+
+For this Time-Series analysis, we will use weekly data within the year 2020 as this year has the most completed data overtime. Here, we will: 
+
+1. Filter only those observations happened in 2020
+
+2. Use the `as.Date()` function on **start_time_2** column to extract only date
+
+3. Use the `cut.Date()` function to allocate our date values into the respective weeks, starting from week 1.
+
+```{r time-series-data}
+accident_ts_dt <- accident_c %>% 
+  filter(year == 2020) %>%
+  mutate(
+    year = year(start_time_2),
+    month = month(start_time_2),
+    date = as.Date(start_time_2)
+  ) %>% 
+  mutate(week = cut.Date(date, breaks = "1 week", labels = FALSE))
+```
+
+Before running the Time-Series model, we firstly visualize our dataset.
+
+```{r time-series-s}
+# Make data possible for time-series analysis
+accident_ts <- accident_ts_dt %>% 
+  group_by(year, month, date) %>% 
+  summarize(count = n()) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  summarize(count = sum(count)) %>% 
+  ungroup() %>% 
+  arrange(date) %>% 
+ filter(count > 410) %>% 
+  select(count) %>% 
+  ts(start = 1, freq = 7)
+
+# Visualize data
+plot(accident_ts, main="US Accidents - Weekly 2020")
+
+```
+
+
+Looking at the plot, we can see the increasing trend overtime and sense of seasonality. Meanwhile the number of accident dropped approximately during week 27 to week 35 (equivalent to July & August), we've found that such decreasing number can be explained by the first peak of Covid-19, at which social distance was implemented. **[Reference 1]**.
+
+With such increasing trends, we will build the Holt Winter model to predict the number of accidents during the first week of 2021.
+
+```{r DES-model}
+accident.HWmodel <- HoltWinters(accident_ts)
+
+plot(accident.HWmodel, main="US Weekly Accidental: HW Model")
+```
+
+Now, let's see the predict number of accidents for the first week of 2021:
+
+```{r DES-predict}
+predict(accident.HWmodel, 7)
+```
+
+The **MSE** Mean Square Error of this model is:
+
+```{r DES-MSE}
+accident.HWmodel$SSE / nrow(accident.HWmodel$fitted)
+```
+
+
+**Time-Series Analysis**
+
+
+
+
+
+
+# Conclusions
+
+# APPENDIX
+
+# REFERENCE
